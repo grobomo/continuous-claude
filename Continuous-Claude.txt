@@ -1,71 +1,77 @@
-Continuous Claude — Infra Adaptation
+Continuous Claude (fork)
+========================
+
+Forked from AnandChowdhary/continuous-claude v0.21.0. Upstream removed.
+
+Changes from upstream:
+  - Removed update/version-check system (~380 lines)
+  - Replaced per-line jq fork loop with single streaming jq process
+    (fixes Git Bash fork exhaustion crash on Windows)
+  - Added --max-turns flag (default 25) to cap tool-call rounds per
+    iteration, preventing runaway iterations
+  - Emojis passed as --arg to jq (Windows jq lacks \U escape support)
+
+Files:
+  continuous-claude    The script (also thin-wrapped in ~/.local/bin/)
+  .github/publish.json Grobomo public repo config
+
+Usage:
+  continuous-claude -p "prompt" -m 5
+  continuous-claude -p "prompt" -m 0 --max-cost 20    # unlimited iterations
+  continuous-claude -p "prompt" -m 3 --max-turns 50   # more turns per iteration
+
+Monitor:
+  tail -f continuous-claude.log
+  gh pr list
+  GitHub Mobile push notifications
+
+
+=====================================
+DDEI Email Security — E2E Test Plan
 =====================================
 
-This project extends continuous-claude (github.com/AnandChowdhary/continuous-claude)
-to work safely with infrastructure projects that have long-running commands
-(terraform, az, aws, etc.).
+Project: lab-worker/labs/ridgeline/ddei-email-security
+Product: share/ folder — a deliverable package for customers
 
-Problem
--------
-Vanilla continuous-claude assumes each iteration is a quick code change (< 5 min).
-Infrastructure projects have tasks like "deploy 9 VMs and verify" that take 40+
-minutes and spawn enough subprocesses to crash Git Bash's fork limit.
+What the customer gets:
+  The share/ folder. That's the product. It contains:
+  - deploy.ps1       One-click Windows deploy (installs prereqs, logs into
+                     Azure, runs full pipeline: build + status + report)
+  - README.md        Complete setup guide
+  - scripts/         Numbered lifecycle scripts (1-6)
+  - tf/              Terraform infrastructure
+  - lib/             Shared functions, report generator, flow analyzer
+  - reports/         Generated PDF reports with screenshots
+  - configs/         Production config template
 
-The ddei-email-security session crashed after one iteration that:
-  - Deployed 9 Azure VMs via Terraform
-  - Ran SSH status checks to each VM
-  - Generated a PDF report with 8 screenshots
-  - Then entered sleep loops waiting for `az vm list -d`
-  - Hit Git Bash fork limit: "fork: Resource temporarily unavailable"
+Customer workflow:
+  1. Edit config file (subscription_id, storage account, cluster sizes)
+  2. Run deploy.ps1
+  3. Get a PDF report with screenshots proving everything is running
+  4. Use stop/start/destroy scripts for lifecycle management
 
-It also never produced a single PR despite finding and fixing 3 real bugs,
-because it tried to do everything in one iteration instead of micro-PRs.
+E2E success criteria:
+  1. EASY CONFIG — User edits a single config file with clear variable names.
+     Several random config combinations should work (different cluster sizes,
+     postfix enabled/disabled, jumpbox enabled/disabled, different VM sizes).
 
-Solution
---------
-infra-claude wraps continuous-claude with:
+  2. EASY DEPLOY — User runs deploy.ps1, everything installs and deploys.
+     No manual steps, no prerequisite hunting, no debugging terraform.
+     deploy.ps1 calls run.sh which calls 1_build + 2_status + 3_report.
 
-1. Rules file (.claude/rules/infra-mode.md)
-   - Tells Claude to ONLY make code changes, never deploy
-   - Forbids terraform apply, az provisioning, ssh, sleep > 5s
-   - Enforces micro-PR strategy (one small fix per iteration)
-   - Cleanup: never leave background processes, tunnels, or locks
+  3. PROOF OF DEPLOYMENT — PDF report with:
+     - Inventory table showing all VMs with names, IPs, ports, power state
+     - Browser screenshots of every web console (real login pages, not errors)
+     - Firewall allowlist
 
-2. TODO.md format (TODO-template.md)
-   - Separates "Code Tasks" (safe for automation) from "Infra Tasks" (manual)
-   - Claude only picks from Code Tasks
+  4. EASY LIFECYCLE — stop/start/destroy scripts work cleanly:
+     - 4_stop.sh deallocates VMs (stops billing)
+     - 5_start.sh starts them back up
+     - 6_destroy.sh tears everything down
+     Each should work without errors on the first try.
 
-3. No artificial limits
-   - No default cost or duration caps
-   - Runs until all Code Tasks done or completion signal fires
-   - User sets limits with --max-cost / --max-duration if desired
-
-Usage (Claude invokes this, not the user)
------------------------------------------
-  # Install rules into a project
-  infra-claude --install-rules /path/to/project
-
-  # Check if project is ready
-  infra-claude --check /path/to/project
-
-  # Run from the project directory
-  cd /path/to/project
-  infra-claude -p "Fix code bugs in TODO.md" -m 10
-
-  # Unlimited iterations (stops on completion signal)
-  infra-claude -p "Fix all code TODOs" -m 0
-
-  # Background with nohup
-  nohup infra-claude -p "Fix code bugs" -m 0 > continuous-claude.log 2>&1 &
-
-Monitor
--------
-  tail -f continuous-claude.log    # live output
-  gh pr list                       # see PRs
-  GitHub Mobile                    # push notifications
-
-Files
------
-  infra-claude         Wrapper script (also in ~/.local/bin/)
-  rules/infra-mode.md  Drop-in rules for target projects
-  TODO-template.md     Template for structuring TODO.md
+What to test with continuous-claude:
+  - Destroy existing env, run deploy.ps1, verify PDF + screenshots
+  - Test stop/start/destroy lifecycle
+  - Try different config combos (toggle postfix, change cluster sizes)
+  - Fix anything that breaks
