@@ -1,0 +1,71 @@
+Continuous Claude — Infra Adaptation
+=====================================
+
+This project extends continuous-claude (github.com/AnandChowdhary/continuous-claude)
+to work safely with infrastructure projects that have long-running commands
+(terraform, az, aws, etc.).
+
+Problem
+-------
+Vanilla continuous-claude assumes each iteration is a quick code change (< 5 min).
+Infrastructure projects have tasks like "deploy 9 VMs and verify" that take 40+
+minutes and spawn enough subprocesses to crash Git Bash's fork limit.
+
+The ddei-email-security session crashed after one iteration that:
+  - Deployed 9 Azure VMs via Terraform
+  - Ran SSH status checks to each VM
+  - Generated a PDF report with 8 screenshots
+  - Then entered sleep loops waiting for `az vm list -d`
+  - Hit Git Bash fork limit: "fork: Resource temporarily unavailable"
+
+It also never produced a single PR despite finding and fixing 3 real bugs,
+because it tried to do everything in one iteration instead of micro-PRs.
+
+Solution
+--------
+infra-claude wraps continuous-claude with:
+
+1. Rules file (.claude/rules/infra-mode.md)
+   - Tells Claude to ONLY make code changes, never deploy
+   - Forbids terraform apply, az provisioning, ssh, sleep > 5s
+   - Enforces micro-PR strategy (one small fix per iteration)
+   - Cleanup: never leave background processes, tunnels, or locks
+
+2. TODO.md format (TODO-template.md)
+   - Separates "Code Tasks" (safe for automation) from "Infra Tasks" (manual)
+   - Claude only picks from Code Tasks
+
+3. No artificial limits
+   - No default cost or duration caps
+   - Runs until all Code Tasks done or completion signal fires
+   - User sets limits with --max-cost / --max-duration if desired
+
+Usage (Claude invokes this, not the user)
+-----------------------------------------
+  # Install rules into a project
+  infra-claude --install-rules /path/to/project
+
+  # Check if project is ready
+  infra-claude --check /path/to/project
+
+  # Run from the project directory
+  cd /path/to/project
+  infra-claude -p "Fix code bugs in TODO.md" -m 10
+
+  # Unlimited iterations (stops on completion signal)
+  infra-claude -p "Fix all code TODOs" -m 0
+
+  # Background with nohup
+  nohup infra-claude -p "Fix code bugs" -m 0 > continuous-claude.log 2>&1 &
+
+Monitor
+-------
+  tail -f continuous-claude.log    # live output
+  gh pr list                       # see PRs
+  GitHub Mobile                    # push notifications
+
+Files
+-----
+  infra-claude         Wrapper script (also in ~/.local/bin/)
+  rules/infra-mode.md  Drop-in rules for target projects
+  TODO-template.md     Template for structuring TODO.md
