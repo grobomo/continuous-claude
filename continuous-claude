@@ -11,7 +11,6 @@ VERSION="1.0.0-fork"
 ADDITIONAL_FLAGS="--dangerously-skip-permissions --output-format stream-json --verbose"
 
 NOTES_FILE="SHARED_TASK_NOTES.md"
-INFRA_MODE=false
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 PROMPT_JQ_INSTALL="Please install jq for JSON parsing"
@@ -200,7 +199,6 @@ OPTIONAL FLAGS:
     --repo <repo>                 GitHub repository name (auto-detected from git remote if not provided)
     --disable-commits             Disable automatic commits and PR creation
     --disable-branches            Commit on current branch without creating branches or PRs
-    --infra                       Enable infra mode (code-only iterations, no deploy commands)
     --git-branch-prefix <prefix>  Branch prefix for iterations (default: "continuous-claude/")
     --merge-strategy <strategy>   PR merge strategy: squash, merge, or rebase (default: "squash")
     --notes-file <file>           Shared notes file for iteration context (default: "SHARED_TASK_NOTES.md")
@@ -271,9 +269,6 @@ EXAMPLES:
     # Disable automatic CI failure retry
     continuous-claude -p "Add tests" -m 5 --owner myuser --repo myproject --disable-ci-retry
 
-    # Infra mode: code-only iterations, no deploy commands
-    continuous-claude -p "Fix code bugs" -m 10 --infra
-
 REQUIREMENTS:
     - Claude Code CLI (https://claude.ai/code)
     - GitHub CLI (gh) - authenticated with 'gh auth login'
@@ -288,42 +283,6 @@ EOF
 show_version() {
     echo "continuous-claude $VERSION"
 }
-
-# ── Infra mode ─────────────────────────────────────────────────────────────
-
-INFRA_PROMPT_SUFFIX='
-IMPORTANT — INFRA PROJECT RULES:
-- Only pick tasks from the "## Code Tasks" section of TODO.md
-- NEVER pick tasks from "## Infra Tasks" — those require manual intervention
-- Each iteration = ONE small code change = ONE micro-PR
-- If a code fix requires testing against live infra, make the code fix now
-  and add a separate "## Infra Tasks" item to verify it later
-- Do NOT run: terraform, az, aws, ansible, docker-compose, kubectl,
-  or any command that deploys/provisions/destroys infrastructure
-- Do NOT use sleep for more than 5 seconds total
-- If you find a bug while reading code, fix it — do not deploy to verify'
-
-install_infra_rules() {
-    local rules_dir=".claude/rules"
-    local rules_src="$SCRIPT_DIR/rules/infra-mode.md"
-    mkdir -p "$rules_dir"
-    if [[ -f "$rules_src" ]]; then
-        if [[ ! -f "$rules_dir/infra-mode.md" ]] || ! diff -q "$rules_src" "$rules_dir/infra-mode.md" >/dev/null 2>&1; then
-            cp "$rules_src" "$rules_dir/infra-mode.md"
-            echo "📋 Installed infra-mode rules" >&2
-        fi
-    else
-        echo "⚠️  Rules source not found: $rules_src" >&2
-    fi
-    # Ensure continuous-claude.log is in .gitignore
-    if [[ -f ".gitignore" ]]; then
-        grep -q 'continuous-claude.log' .gitignore || echo 'continuous-claude.log' >> .gitignore
-    else
-        echo 'continuous-claude.log' > .gitignore
-    fi
-}
-
-# ── GitHub repo detection ──────────────────────────────────────────────────
 
 detect_github_repo() {
     # Try to detect GitHub owner and repo from git remote
@@ -419,10 +378,6 @@ parse_arguments() {
                 ;;
             --disable-branches)
                 DISABLE_BRANCHES=true
-                shift
-                ;;
-            --infra)
-                INFRA_MODE=true
                 shift
                 ;;
             --notes-file)
@@ -1272,126 +1227,103 @@ run_claude_iteration() {
     local exit_code=0
 
     # Stream stdout (stream-json) to terminal in human-readable format while capturing raw JSON
-    # Filter extracts text from assistant messages for display
+    # IMPORTANT: Uses a single streaming jq process instead of per-line forks.
+    # The original bash while-read loop forked 2-3 jq processes per JSON line,
+    # which exhausts Git Bash's ~1000 process limit on long iterations.
     set -o pipefail
     claude -p "$prompt" $flags "${EXTRA_CLAUDE_FLAGS[@]}" 2> >(tee "$temp_stderr" >&2) | \
         tee "$temp_stdout" | \
-        while IFS= read -r line; do
-            # Extract text from assistant messages for human-readable display
-            text=$(echo "$line" | jq -r '
-                if .type == "assistant" then
-                    .message.content[]? | select(.type == "text") | .text // empty
-                elif .type == "result" then
-                    empty
+        jq -r --unbuffered --arg prefix "   $iteration_display" --arg pwd "$PWD" \
+            --arg E_READ "📖" --arg E_WRITE "✍️" --arg E_EDIT "✏️" --arg E_BASH "💻" \
+            --arg E_GLOB "📁" --arg E_GREP "🔎" --arg E_TASK "📋" --arg E_WEB "🌍" \
+            --arg E_SEARCH "🔍" --arg E_NOTE "📓" --arg E_ASK "❓" --arg E_SKILL "⚡" \
+            --arg E_TODO "📝" --arg E_OUT "📤" --arg E_STOP "🛑" --arg E_MAP "🗺️" \
+            --arg E_MCP "🔌" --arg E_TOOL "🛠️" --arg E_TALK "💬" --arg E_ARROW "→" '
+            # Helper function to strip PWD prefix from paths
+            def relpath: (if startswith($pwd + "/") then .[$pwd | length + 1:] elif . == $pwd then "." else . end) // .;
+            # Helper to safely get detail string with fallback
+            def get_detail:
+                if .name == "Bash" then
+                    ((.input.command // "" | gsub($pwd + "/"; "") | split("\n")[0] | if length > 1000 then .[0:1000] + "..." else . end) // "")
+                elif .name == "Read" then
+                    (((.input.file_path // "") | relpath) + (if .input.offset then " (line " + (.input.offset | tostring) + ")" else "" end)) // ""
+                elif .name == "Write" or .name == "Edit" or .name == "MultiEdit" then
+                    ((.input.file_path // "") | relpath) // ""
+                elif .name == "Glob" then
+                    ((.input.pattern // "") + (if .input.path then " in " + (.input.path | relpath) else "" end)) // ""
+                elif .name == "Grep" then
+                    (("\"" + (.input.pattern // "") + "\"" + (if .input.path then " in " + (.input.path | relpath) else "" end) + (if .input.glob then " (" + .input.glob + ")" else "" end))) // ""
+                elif .name == "WebFetch" or (.name | startswith("WebFetch")) then
+                    (((.input.url // "") + " " + $E_ARROW + "" + ((.input.prompt // "") | if length > 1000 then .[0:1000] + "..." else . end))) // ""
+                elif .name == "WebSearch" or (.name | startswith("WebSearch")) then
+                    (("\"" + (.input.query // "") + "\"" + (if .input.allowed_domains then " (domains: " + (.input.allowed_domains | join(", ")) + ")" else "" end))) // ""
+                elif .name == "Task" then
+                    (("[" + (.input.subagent_type // "agent") + "] " + (.input.description // ""))) // ""
+                elif .name == "NotebookEdit" then
+                    ((((.input.notebook_path // "") | relpath) + " [" + (.input.edit_mode // "replace") + "]")) // ""
+                elif .name == "AskUserQuestion" then
+                    ((.input.questions[0].question // "" | if length > 1000 then .[0:1000] + "..." else . end)) // ""
+                elif .name == "Skill" or .name == "SlashCommand" then
+                    (("/" + (.input.skill // .input.command // "") + (if .input.args then " " + .input.args else "" end))) // ""
+                elif (.name | test("TodoWrite"; "i")) then
+                    ((if .input.todos then
+                        (.input.todos | map(select(.status == "in_progress") | .content // .activeForm) | first //
+                         (.input.todos | first | .content // .activeForm // "")) |
+                        if length > 1000 then .[0:1000] + "..." else . end
+                    else "" end)) // ""
+                elif (.name | test("TaskCreate"; "i")) then
+                    (.input.subject // .input.description // "")
+                elif (.name | test("TaskUpdate"; "i")) then
+                    (("#" + (.input.taskId // "") + " " + $E_ARROW + "" + (.input.status // "update"))) // ""
+                elif (.name | test("TaskList|TaskGet"; "i")) then
+                    ((if .input.taskId then "#" + .input.taskId else "" end)) // ""
+                elif .name == "TaskOutput" or .name == "BashOutput" then
+                    (("id:" + (.input.task_id // .input.bash_id // ""))) // ""
+                elif .name == "KillShell" then
+                    (("id:" + (.input.shell_id // ""))) // ""
+                elif .name == "ExitPlanMode" or .name == "EnterPlanMode" then
+                    ""
+                elif (.name | startswith("mcp__")) then
+                    ((.name | split("__") | .[1:] | join("/"))) // .name
                 else
-                    empty
-                end
-            ' 2>/dev/null)
-            if [ -n "$text" ]; then
-                # Indent each line with the iteration prefix and speech emoji
-                echo "$text" | while IFS= read -r output_line; do
-                    printf "   %s 💬 %s\n" "$iteration_display" "$output_line" >&2
-                done
-            fi
-
-            # Extract tool_use events from assistant messages
-            # Pass PWD to jq to convert absolute paths to relative paths
-            # Uses fallback to tool name if parsing fails
-            tool_info=$(echo "$line" | jq -r --arg pwd "$PWD" '
-                # Helper function to strip PWD prefix from paths
-                def relpath: (if startswith($pwd + "/") then .[$pwd | length + 1:] elif . == $pwd then "." else . end) // .;
-                # Helper to safely get detail string with fallback
-                def get_detail:
-                    if .name == "Bash" then
-                        ((.input.command // "" | gsub($pwd + "/"; "") | split("\n")[0] | if length > 1000 then .[0:1000] + "..." else . end) // "")
-                    elif .name == "Read" then
-                        (((.input.file_path // "") | relpath) + (if .input.offset then " (line " + (.input.offset | tostring) + ")" else "" end)) // ""
-                    elif .name == "Write" or .name == "Edit" or .name == "MultiEdit" then
-                        ((.input.file_path // "") | relpath) // ""
-                    elif .name == "Glob" then
-                        ((.input.pattern // "") + (if .input.path then " in " + (.input.path | relpath) else "" end)) // ""
-                    elif .name == "Grep" then
-                        (("\"" + (.input.pattern // "") + "\"" + (if .input.path then " in " + (.input.path | relpath) else "" end) + (if .input.glob then " (" + .input.glob + ")" else "" end))) // ""
-                    elif .name == "WebFetch" or (.name | startswith("WebFetch")) then
-                        (((.input.url // "") + " → " + ((.input.prompt // "") | if length > 1000 then .[0:1000] + "..." else . end))) // ""
-                    elif .name == "WebSearch" or (.name | startswith("WebSearch")) then
-                        (("\"" + (.input.query // "") + "\"" + (if .input.allowed_domains then " (domains: " + (.input.allowed_domains | join(", ")) + ")" else "" end))) // ""
-                    elif .name == "Task" then
-                        (("[" + (.input.subagent_type // "agent") + "] " + (.input.description // ""))) // ""
-                    elif .name == "NotebookEdit" then
-                        ((((.input.notebook_path // "") | relpath) + " [" + (.input.edit_mode // "replace") + "]")) // ""
-                    elif .name == "AskUserQuestion" then
-                        ((.input.questions[0].question // "" | if length > 1000 then .[0:1000] + "..." else . end)) // ""
-                    elif .name == "Skill" or .name == "SlashCommand" then
-                        (("/" + (.input.skill // .input.command // "") + (if .input.args then " " + .input.args else "" end))) // ""
-                    elif (.name | test("TodoWrite"; "i")) then
-                        ((if .input.todos then
-                            (.input.todos | map(select(.status == "in_progress") | .content // .activeForm) | first //
-                             (.input.todos | first | .content // .activeForm // "")) |
-                            if length > 1000 then .[0:1000] + "..." else . end
-                        else "" end)) // ""
-                    elif (.name | test("TaskCreate"; "i")) then
-                        (.input.subject // .input.description // "")
-                    elif (.name | test("TaskUpdate"; "i")) then
-                        (("#" + (.input.taskId // "") + " → " + (.input.status // "update"))) // ""
-                    elif (.name | test("TaskList|TaskGet"; "i")) then
-                        ((if .input.taskId then "#" + .input.taskId else "" end)) // ""
-                    elif .name == "TaskOutput" or .name == "BashOutput" then
-                        (("id:" + (.input.task_id // .input.bash_id // ""))) // ""
-                    elif .name == "KillShell" then
-                        (("id:" + (.input.shell_id // ""))) // ""
-                    elif .name == "ExitPlanMode" or .name == "EnterPlanMode" then
-                        ""
-                    elif (.name | startswith("mcp__")) then
-                        ((.name | split("__") | .[1:] | join("/"))) // .name
-                    else
-                        .name
-                    end;
-                # Get emoji with fallback
-                def get_emoji:
-                    if .name == "Read" then "📖"
-                    elif .name == "Write" then "✍️"
-                    elif .name == "Edit" or .name == "MultiEdit" then "✏️"
-                    elif .name == "Bash" then "💻"
-                    elif .name == "Glob" then "📁"
-                    elif .name == "Grep" then "🔎"
-                    elif .name == "Task" then "📋"
-                    elif .name == "WebFetch" or ((.name | startswith("WebFetch")) // false) then "🌍"
-                    elif .name == "WebSearch" or ((.name | startswith("WebSearch")) // false) then "🔍"
-                    elif .name == "NotebookEdit" then "📓"
-                    elif .name == "AskUserQuestion" then "❓"
-                    elif .name == "Skill" or .name == "SlashCommand" then "⚡"
-                    elif ((.name | test("Todo|TaskCreate|TaskUpdate|TaskList|TaskGet"; "i")) // false) then "📝"
-                    elif .name == "TaskOutput" or .name == "BashOutput" then "📤"
-                    elif .name == "KillShell" then "🛑"
-                    elif .name == "ExitPlanMode" or .name == "EnterPlanMode" then "🗺️"
-                    elif ((.name | startswith("mcp__")) // false) then "🔌"
-                    else "🛠️"
-                    end;
-                if .type == "assistant" then
-                    .message.content[]? |
+                    .name
+                end;
+            # Get emoji with fallback (passed as --arg to avoid \U escape issues on Windows jq)
+            def get_emoji:
+                if .name == "Read" then $E_READ
+                elif .name == "Write" then $E_WRITE
+                elif .name == "Edit" or .name == "MultiEdit" then $E_EDIT
+                elif .name == "Bash" then $E_BASH
+                elif .name == "Glob" then $E_GLOB
+                elif .name == "Grep" then $E_GREP
+                elif .name == "Task" then $E_TASK
+                elif .name == "WebFetch" or ((.name | startswith("WebFetch")) // false) then $E_WEB
+                elif .name == "WebSearch" or ((.name | startswith("WebSearch")) // false) then $E_SEARCH
+                elif .name == "NotebookEdit" then $E_NOTE
+                elif .name == "AskUserQuestion" then $E_ASK
+                elif .name == "Skill" or .name == "SlashCommand" then $E_SKILL
+                elif ((.name | test("Todo|TaskCreate|TaskUpdate|TaskList|TaskGet"; "i")) // false) then $E_TODO
+                elif .name == "TaskOutput" or .name == "BashOutput" then $E_OUT
+                elif .name == "KillShell" then $E_STOP
+                elif .name == "ExitPlanMode" or .name == "EnterPlanMode" then $E_MAP
+                elif ((.name | startswith("mcp__")) // false) then $E_MCP
+                else $E_TOOL
+                end;
+            if .type == "assistant" then
+                # Emit text content
+                (.message.content[]? |
+                    select(.type == "text") |
+                    .text // empty |
+                    split("\n")[] |
+                    ($prefix + " " + $E_TALK + " " + .)),
+                # Emit tool_use content
+                (.message.content[]? |
                     select(.type == "tool_use") |
-                    ((get_emoji) + " " + ((get_detail) // .name // "unknown"))
-                else
-                    empty
-                end
-            ' 2>/dev/null)
-
-            # Fallback: if jq failed completely, try simple extraction
-            if [ -z "$tool_info" ]; then
-                tool_info=$(echo "$line" | jq -r '
-                    if .type == "assistant" then
-                        .message.content[]? | select(.type == "tool_use") | "🛠️ " + .name
-                    else empty end
-                ' 2>/dev/null)
-            fi
-
-            if [ -n "$tool_info" ]; then
-                echo "$tool_info" | while IFS= read -r tool_line; do
-                    printf "   %s %s\n" "$iteration_display" "$tool_line" >&2
-                done
-            fi
-        done
+                    ($prefix + " " + get_emoji + " " + ((get_detail) // .name // "unknown")))
+            else
+                empty
+            end
+        ' >&2
     exit_code=${PIPESTATUS[0]}
     set +o pipefail
 
@@ -1927,10 +1859,9 @@ main() {
     validate_arguments
     validate_requirements
 
-    # Infra mode: install rules and append prompt constraints
-    if [ "$INFRA_MODE" = "true" ]; then
-        install_infra_rules
-        PROMPT="${PROMPT}${INFRA_PROMPT_SUFFIX}"
+    # Ensure continuous-claude.log is in .gitignore
+    if [ -f ".gitignore" ]; then
+        grep -q 'continuous-claude.log' .gitignore 2>/dev/null || echo 'continuous-claude.log' >> .gitignore
     fi
 
     # Handle --list-worktrees flag
