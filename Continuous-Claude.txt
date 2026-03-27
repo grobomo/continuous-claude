@@ -12,66 +12,15 @@ Changes from upstream:
   - Emojis passed as --arg to jq (Windows jq lacks \U escape support)
 
 Files:
-  continuous-claude    The script (also thin-wrapped in ~/.local/bin/)
+  continuous-claude    The script (thin-wrapped in ~/.local/bin/)
   .github/publish.json Grobomo public repo config
 
 Usage:
   continuous-claude -p "prompt" -m 5
-  continuous-claude -p "prompt" -m 0 --max-cost 20    # unlimited iterations
-  continuous-claude -p "prompt" -m 3 --max-turns 50   # more turns per iteration
+  continuous-claude -p "prompt" -m 0 --max-cost 20
+  continuous-claude -p "prompt" -m 3 --max-turns 50
 
 Monitor:
   tail -f continuous-claude.log
   gh pr list
   GitHub Mobile push notifications
-
-
-=====================================
-DDEI Email Security — E2E Test Plan
-=====================================
-
-Project: lab-worker/labs/ridgeline/ddei-email-security
-Product: share/ folder — a deliverable package for customers
-
-What the customer gets:
-  The share/ folder. That's the product. It contains:
-  - deploy.ps1       One-click Windows deploy (installs prereqs, logs into
-                     Azure, runs full pipeline: build + status + report)
-  - README.md        Complete setup guide
-  - scripts/         Numbered lifecycle scripts (1-6)
-  - tf/              Terraform infrastructure
-  - lib/             Shared functions, report generator, flow analyzer
-  - reports/         Generated PDF reports with screenshots
-  - configs/         Production config template
-
-Customer workflow:
-  1. Edit config file (subscription_id, storage account, cluster sizes)
-  2. Run deploy.ps1
-  3. Get a PDF report with screenshots proving everything is running
-  4. Use stop/start/destroy scripts for lifecycle management
-
-E2E success criteria:
-  1. EASY CONFIG — User edits a single config file with clear variable names.
-     Several random config combinations should work (different cluster sizes,
-     postfix enabled/disabled, jumpbox enabled/disabled, different VM sizes).
-
-  2. EASY DEPLOY — User runs deploy.ps1, everything installs and deploys.
-     No manual steps, no prerequisite hunting, no debugging terraform.
-     deploy.ps1 calls run.sh which calls 1_build + 2_status + 3_report.
-
-  3. PROOF OF DEPLOYMENT — PDF report with:
-     - Inventory table showing all VMs with names, IPs, ports, power state
-     - Browser screenshots of every web console (real login pages, not errors)
-     - Firewall allowlist
-
-  4. EASY LIFECYCLE — stop/start/destroy scripts work cleanly:
-     - 4_stop.sh deallocates VMs (stops billing)
-     - 5_start.sh starts them back up
-     - 6_destroy.sh tears everything down
-     Each should work without errors on the first try.
-
-What to test with continuous-claude:
-  - Destroy existing env, run deploy.ps1, verify PDF + screenshots
-  - Test stop/start/destroy lifecycle
-  - Try different config combos (toggle postfix, change cluster sizes)
-  - Fix anything that breaks
