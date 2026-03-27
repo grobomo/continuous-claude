@@ -23,8 +23,6 @@ This is part of a continuous development loop where work happens incrementally a
 
 **Important**: You don't need to complete the entire goal in one iteration. Just make meaningful progress on one thing, then leave clear notes for the next iteration (human or AI). Think of it as a relay race where you're passing the baton.
 
-**One task per iteration**: Pick ONE unchecked item from the TODO or task list. Do that one thing, then stop. Do not chain multiple tasks together (e.g., deploy AND test AND fix AND redeploy is four tasks, not one). If a task naturally produces a result that reveals the next task, leave it for the next iteration.
-
 **Do NOT commit or push changes** - The automation will handle committing and pushing your changes after you finish. Just focus on making the code changes.
 
 **Project Completion Signal**: If you determine that not just your current task but the ENTIRE project goal is fully complete (nothing more to be done on the overall goal), only include the exact phrase \"COMPLETION_SIGNAL_PLACEHOLDER\" in your response. Only use this when absolutely certain that the whole project is finished, not just your individual task. We will stop working on this project when multiple developers independently determine that the project is complete.
@@ -91,6 +89,7 @@ LIST_WORKTREES=false
 DRY_RUN=false
 COMPLETION_SIGNAL="CONTINUOUS_CLAUDE_PROJECT_COMPLETE"
 COMPLETION_THRESHOLD=3
+MAX_TURNS=25
 ERROR_LOG=""
 error_count=0
 extra_iterations=0
@@ -216,6 +215,8 @@ OPTIONAL FLAGS:
                                   (e.g., run build/lint/tests and fix any issues)
     --disable-ci-retry            Disable automatic CI failure retry (enabled by default)
     --ci-retry-max <number>       Maximum CI fix attempts per PR (default: 1)
+    --max-turns <number>          Max tool-call rounds per iteration (default: 25). Prevents
+                                  one iteration from doing too much (e.g., deploy+test+fix).
 
 EXAMPLES:
     # Run 5 iterations to fix bugs
@@ -424,6 +425,10 @@ parse_arguments() {
                 ;;
             --ci-retry-max)
                 CI_RETRY_MAX_ATTEMPTS="$2"
+                shift 2
+                ;;
+            --max-turns)
+                MAX_TURNS="$2"
                 shift 2
                 ;;
             *)
@@ -1233,7 +1238,7 @@ run_claude_iteration() {
     # The original bash while-read loop forked 2-3 jq processes per JSON line,
     # which exhausts Git Bash's ~1000 process limit on long iterations.
     set -o pipefail
-    claude -p "$prompt" $flags "${EXTRA_CLAUDE_FLAGS[@]}" 2> >(tee "$temp_stderr" >&2) | \
+    claude -p "$prompt" $flags --max-turns "$MAX_TURNS" "${EXTRA_CLAUDE_FLAGS[@]}" 2> >(tee "$temp_stderr" >&2) | \
         tee "$temp_stdout" | \
         jq -r --unbuffered --arg prefix "   $iteration_display" --arg pwd "$PWD" \
             --arg E_READ "📖" --arg E_WRITE "✍️" --arg E_EDIT "✏️" --arg E_BASH "💻" \
